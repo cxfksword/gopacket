@@ -105,8 +105,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/cxfksword/gopacket"
+	"github.com/cxfksword/gopacket/layers"
 )
 
 const errorBufferSize = 256

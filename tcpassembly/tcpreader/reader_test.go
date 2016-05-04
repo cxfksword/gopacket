@@ -9,9 +9,9 @@ package tcpreader
 import (
 	"bytes"
 	"fmt"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/tcpassembly"
+	"github.com/cxfksword/gopacket"
+	"github.com/cxfksword/gopacket/layers"
+	"github.com/cxfksword/gopacket/tcpassembly"
 	"io"
 	"net"
 	"testing"

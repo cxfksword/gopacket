@@ -11,7 +11,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/google/gopacket"
+	"github.com/cxfksword/gopacket"
 )
 
 // TCP is the layer for TCP headers.
