@@ -19,15 +19,18 @@ import (
 	"net"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/cxfksword/gopacket"
+	"golang.org/x/net/bpf"
 )
 
 /*
 #include <linux/if_packet.h>  // AF_PACKET, sockaddr_ll
 #include <linux/if_ether.h>  // ETH_P_ALL
+#include <linux/filter.h>  // sock_fprog
 #include <sys/socket.h>  // socket()
 #include <unistd.h>  // close()
 #include <arpa/inet.h>  // htons()
@@ -58,6 +61,9 @@ type SocketStats C.struct_tpacket_stats
 
 // SocketStatsV3 is a struct where socket stats for TPacketV3 are stored
 type SocketStatsV3 C.struct_tpacket_stats_v3
+
+// socket filtering program struct
+type SockFprog C.struct_sock_fprog
 
 type TPacket struct {
 	// fd is the C file descriptor.
@@ -429,4 +435,91 @@ func (h *TPacket) SetFanout(t FanoutType, id uint16) error {
 func (h *TPacket) WritePacketData(pkt []byte) error {
 	_, err := C.write(h.fd, unsafe.Pointer(&pkt[0]), C.size_t(len(pkt)))
 	return err
+}
+
+// SetBPFFilter compiles and sets a BPF filter for the TPacket handle.
+func (h *TPacket) SetBPFFilter(expr string) (err error) {
+
+	// TODO: refactor to use imprement BPF syntax lexer
+	// https://godoc.org/golang.org/x/net/bpf
+	// https://www.kernel.org/doc/Documentation/networking/filter.txt
+	var instructions []bpf.RawInstruction
+	if expr == "tcp and not port 22 and not port 2222 and not port 8333" {
+		// sudo tcpdump -d "tcp and not port 22 and not port 2222 and not port 8333"
+		instructions, err = bpf.Assemble([]bpf.Instruction{
+			// Load "EtherType" field from the ethernet header.
+			bpf.LoadAbsolute{Off: 12, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x86dd, SkipFalse: 11},
+			bpf.LoadAbsolute{Off: 20, Size: 1},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x6, SkipFalse: 6},
+			bpf.LoadAbsolute{Off: 54, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x16, SkipTrue: 22},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x8ae, SkipTrue: 21},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x208d, SkipTrue: 20},
+			bpf.LoadAbsolute{Off: 56, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x16, SkipTrue: 18, SkipFalse: 15},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x2c, SkipFalse: 17},
+			bpf.LoadAbsolute{Off: 54, Size: 1},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x6, SkipTrue: 14, SkipFalse: 15},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x800, SkipFalse: 14},
+			bpf.LoadAbsolute{Off: 23, Size: 1},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x6, SkipFalse: 12},
+			bpf.LoadAbsolute{Off: 20, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpBitsSet, Val: 0x1fff, SkipTrue: 9},
+			bpf.LoadMemShift{Off: 14},
+			bpf.LoadIndirect{Off: 14, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x16, SkipTrue: 7},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x8ae, SkipTrue: 6},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x208d, SkipTrue: 5},
+			bpf.LoadIndirect{Off: 16, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x16, SkipTrue: 3},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x8ae, SkipTrue: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x208d, SkipTrue: 1},
+			// Verdict is "send up to 4k of the packet to userspace."
+			bpf.RetConstant{Val: 65535},
+			// Verdict is "ignore packet."
+			bpf.RetConstant{Val: 0},
+		})
+	} else {
+		// sudo tcpdump -d "tcp"
+		instructions, err = bpf.Assemble([]bpf.Instruction{
+			// Load "EtherType" field from the ethernet header.
+			bpf.LoadAbsolute{Off: 12, Size: 2},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x86dd, SkipFalse: 5},
+			bpf.LoadAbsolute{Off: 20, Size: 1},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x6, SkipTrue: 6},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x2c, SkipFalse: 6},
+			bpf.LoadAbsolute{Off: 54, Size: 1},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x6, SkipTrue: 3, SkipFalse: 4},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x800, SkipFalse: 3},
+			bpf.LoadAbsolute{Off: 23, Size: 1},
+			bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x6, SkipFalse: 1},
+			// Verdict is "send up to 4k of the packet to userspace."
+			bpf.RetConstant{Val: 65535},
+			// Verdict is "ignore packet."
+			bpf.RetConstant{Val: 0},
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("afpacket set bpf error: %s", err)
+	}
+
+	sockfilters := []syscall.SockFilter{}
+	for _, ins := range instructions {
+		// compare bpf code correct: sudo tcpdump -ddd "tcp"
+		// fmt.Printf("%d %d %d %d\n", ins.Op, ins.Jt, ins.Jf, ins.K)
+		sockfilters = append(sockfilters, syscall.SockFilter{
+			Code: ins.Op,
+			Jt:   ins.Jt,
+			Jf:   ins.Jf,
+			K:    ins.K,
+		})
+	}
+
+	err = syscall.AttachLsf(int(h.fd), sockfilters)
+	if err != nil {
+		return fmt.Errorf("setsockopt: %s", err)
+	}
+
+	return nil
 }
