@@ -394,7 +394,8 @@ func (h *TPacket) pollForFirstPacket(hdr header) error {
 		h.pollset.fd = h.fd
 		h.pollset.events = C.POLLIN
 		h.pollset.revents = 0
-		_, err := C.poll(&h.pollset, 1, -1)
+		timeout := C.int(h.opts.timeout / time.Millisecond)
+		_, err := C.poll(&h.pollset, 1, timeout)
 		h.stats.Polls++
 		if err != nil {
 			return err
