@@ -28,7 +28,7 @@ import (
 )
 
 /*
-#include <linux/if_packet.h>  // AF_PACKET, sockaddr_ll
+#include "if_packet.h"  // AF_PACKET, sockaddr_ll
 #include <linux/if_ether.h>  // ETH_P_ALL
 #include <linux/filter.h>  // sock_fprog
 #include <sys/socket.h>  // socket()
