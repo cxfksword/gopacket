@@ -149,10 +149,6 @@ func (h *TPacket) setRequestedTPacketVersion() error {
 
 // setUpRing sets up the shared-memory ring buffer between the user process and the kernel.
 func (h *TPacket) setUpRing() (err error) {
-	if !h.supportRing {
-		return nil
-	}
-
 	totalSize := C.uint(h.opts.framesPerBlock * h.opts.numBlocks * h.opts.frameSize)
 	switch h.tpVersion {
 	case TPacketVersion1, TPacketVersion2:
@@ -218,12 +214,14 @@ func NewTPacket(opts ...interface{}) (h *TPacket, err error) {
 	if err = h.bindToInterface(h.opts.iface); err != nil {
 		goto errlbl
 	}
-	if err = h.setRequestedTPacketVersion(); err != nil {
-		goto errlbl
-	}
 	h.supportRing = supportRingMmap()
-	if err = h.setUpRing(); err != nil {
-		goto errlbl
+	if h.supportRing {
+		if err = h.setRequestedTPacketVersion(); err != nil {
+			goto errlbl
+		}
+		if err = h.setUpRing(); err != nil {
+			goto errlbl
+		}
 	}
 	// Clear stat counter from socket
 	if err = h.InitSocketStats(); err != nil {
