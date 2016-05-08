@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	"github.com/cxfksword/gopacket"
+	"github.com/cxfksword/gopacket/layers"
 	"golang.org/x/net/bpf"
 )
 
@@ -93,24 +94,28 @@ type TPacket struct {
 	// getTPacketHeader, and we don't want to allocate a v3wrapper every time,
 	// so we leave it in the TPacket object and return a pointer to it.
 	v3 v3wrapper
+	// current interface index
+	ifIndex int
+	// support ring mmap
+	supportRing bool
 }
 
 // bindToInterface binds the TPacket socket to a particular named interface.
 func (h *TPacket) bindToInterface(ifaceName string) error {
-	ifIndex := 0
+	h.ifIndex = 0
 	// An empty string here means to listen to all interfaces
 	if ifaceName != "" {
 		iface, err := net.InterfaceByName(ifaceName)
 		if err != nil {
 			return fmt.Errorf("InterfaceByName: %v", err)
 		}
-		ifIndex = iface.Index
+		h.ifIndex = iface.Index
 	}
 
 	var ll C.struct_sockaddr_ll
 	ll.sll_family = C.AF_PACKET
 	ll.sll_protocol = C.__be16(C.htons(C.ETH_P_ALL))
-	ll.sll_ifindex = C.int(ifIndex)
+	ll.sll_ifindex = C.int(h.ifIndex)
 	if _, err := C.bind(h.fd, (*C.struct_sockaddr)(unsafe.Pointer(&ll)), C.socklen_t(unsafe.Sizeof(ll))); err != nil {
 		return fmt.Errorf("bindToInterface: %v", err)
 	}
@@ -144,6 +149,10 @@ func (h *TPacket) setRequestedTPacketVersion() error {
 
 // setUpRing sets up the shared-memory ring buffer between the user process and the kernel.
 func (h *TPacket) setUpRing() (err error) {
+	if !h.supportRing {
+		return nil
+	}
+
 	totalSize := C.uint(h.opts.framesPerBlock * h.opts.numBlocks * h.opts.frameSize)
 	switch h.tpVersion {
 	case TPacketVersion1, TPacketVersion2:
@@ -212,6 +221,7 @@ func NewTPacket(opts ...interface{}) (h *TPacket, err error) {
 	if err = h.setRequestedTPacketVersion(); err != nil {
 		goto errlbl
 	}
+	h.supportRing = supportRingMmap()
 	if err = h.setUpRing(); err != nil {
 		goto errlbl
 	}
@@ -256,11 +266,62 @@ func (h *TPacket) ZeroCopyReadPacketData() (data []byte, ci gopacket.CaptureInfo
 			return
 		}
 	}
+
 	data = h.current.getData()
+
+	// poll timeout
+	if len(data) <= 0 {
+		h.mu.Unlock()
+		return
+	}
+
 	ci.Timestamp = h.current.getTime()
 	ci.CaptureLength = len(data)
 	ci.Length = h.current.getLength()
 	ci.InterfaceIndex = h.current.getIfaceIndex()
+	h.stats.Packets++
+	h.mu.Unlock()
+	return
+}
+
+func (h *TPacket) ReadRawPacketData() (data []byte, ci gopacket.CaptureInfo, err error) {
+	h.mu.Lock()
+	buf := make([]byte, 65536)
+
+	// poll data with timeout
+	h.pollset.fd = h.fd
+	h.pollset.events = C.POLLIN
+	h.pollset.revents = 0
+	timeout := C.int(h.opts.timeout / time.Millisecond)
+	ret, err := C.poll(&h.pollset, 1, timeout)
+	h.stats.Polls++
+	if err != nil || ret == -1 || ret == 0 {
+		h.mu.Unlock()
+		return
+	}
+
+	// read data
+	n, _, err := syscall.Recvfrom(int(h.fd), buf, 0)
+	if err != nil {
+		h.mu.Unlock()
+		return
+	}
+	if n <= 0 {
+		h.mu.Unlock()
+		return
+	}
+
+	p := gopacket.NewPacket(buf[:n], layers.LayerTypeEthernet, gopacket.Default)
+	if linkLayer := p.LinkLayer(); linkLayer == nil {
+		h.mu.Unlock()
+		return
+	}
+
+	data = p.Data()
+	ci.Timestamp = time.Now()
+	ci.CaptureLength = len(data)
+	ci.Length = len(data)
+	ci.InterfaceIndex = h.ifIndex
 	h.stats.Packets++
 	h.mu.Unlock()
 	return
@@ -341,7 +402,11 @@ func (h *TPacket) SocketStats() (SocketStats, SocketStatsV3, error) {
 // the captured packet.
 func (h *TPacket) ReadPacketDataTo(data []byte) (ci gopacket.CaptureInfo, err error) {
 	var d []byte
-	d, ci, err = h.ZeroCopyReadPacketData()
+	if h.supportRing {
+		d, ci, err = h.ZeroCopyReadPacketData()
+	} else {
+		d, ci, err = h.ReadRawPacketData()
+	}
 	if err != nil {
 		return
 	}
@@ -354,7 +419,11 @@ func (h *TPacket) ReadPacketDataTo(data []byte) (ci gopacket.CaptureInfo, err er
 // use.  This implements gopacket.PacketDataSource.
 func (h *TPacket) ReadPacketData() (data []byte, ci gopacket.CaptureInfo, err error) {
 	var d []byte
-	d, ci, err = h.ZeroCopyReadPacketData()
+	if h.supportRing {
+		d, ci, err = h.ZeroCopyReadPacketData()
+	} else {
+		d, ci, err = h.ReadRawPacketData()
+	}
 	if err != nil {
 		return
 	}
@@ -386,6 +455,7 @@ func (h *TPacket) getTPacketHeader() header {
 		h.v3 = initV3Wrapper(unsafe.Pointer(position))
 		return &h.v3
 	}
+
 	panic("handle tpacket version is invalid")
 }
 
