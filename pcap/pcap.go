@@ -14,9 +14,9 @@ package pcap
 #cgo freebsd LDFLAGS: -lpcap
 #cgo openbsd LDFLAGS: -lpcap
 #cgo darwin LDFLAGS: -lpcap
-#cgo windows CFLAGS: -I C:/WpdPack/Include
-#cgo windows,386 LDFLAGS: -L C:/WpdPack/Lib -lwpcap
-#cgo windows,amd64 LDFLAGS: -L C:/WpdPack/Lib/x64 -lwpcap
+#cgo windows CFLAGS: -I /libpcap/win/WpdPack/Include
+#cgo windows,386 LDFLAGS: -L /libpcap/win/WpdPack/Lib -lwpcap
+#cgo windows,amd64 LDFLAGS: -L /libpcap/win/WpdPack/Lib/x64 -lwpcap
 #include <stdlib.h>
 #include <pcap.h>
 
@@ -247,6 +247,17 @@ func OpenOffline(file string) (handle *Handle, err error) {
 	cptr := C.pcap_open_offline(cf, buf)
 	if cptr == nil {
 		return nil, errors.New(C.GoString(buf))
+	}
+	return &Handle{cptr: cptr}, nil
+}
+
+// OpenDead creates a Pcap handle without having it attached to a device
+// or to a file. It is typically used when just using the pcap package
+// for compiling BPF code.
+func OpenDead(linktype layers.LinkType, snaplen int32) (handle *Handle, _ error) {
+	cptr := C.pcap_open_dead(C.int(linktype), C.int(snaplen))
+	if cptr == nil {
+		return nil, errors.New("pcap_open_dead failed")
 	}
 	return &Handle{cptr: cptr}, nil
 }
@@ -934,4 +945,68 @@ func (p *InactiveHandle) SetImmediateMode(mode bool) error {
 		return statusError(status)
 	}
 	return nil
+}
+
+
+// Dumper can be used to write packet data to a file.
+type Dumper struct {
+	h    *Handle
+	cptr *C.pcap_dumper_t
+}
+
+// Returns a Dumper read to write packets from the given pcap
+// handler in the file given as parameter.
+func (h *Handle) NewDumper(file string) (dumper *Dumper, err error) {
+	cf := C.CString(file)
+	defer C.free(unsafe.Pointer(cf))
+
+	cptr, err := C.pcap_dump_open(h.cptr, cf)
+	if err != nil {
+		return
+	}
+	if cptr == nil {
+		return nil, fmt.Errorf("Failed to open file: %s", file)
+	}
+	return &Dumper{h: h, cptr: cptr}, nil
+}
+
+// Writes a packet to the file. The return values of ReadPacketData
+// can be passed to this function as arguments.
+func (d *Dumper) WritePacketData(data []byte, ci gopacket.CaptureInfo) (err error) {
+	var pkthdr _Ctype_struct_pcap_pkthdr
+	pkthdr.caplen = C.bpf_u_int32(ci.CaptureLength)
+	pkthdr.len = C.bpf_u_int32(ci.Length)
+
+	pkthdr.ts.tv_sec = C.gopacket_time_secs_t(ci.Timestamp.Unix())
+	pkthdr.ts.tv_usec = C.gopacket_time_usecs_t(ci.Timestamp.Nanosecond() / 1000)
+
+	// pcap_dump takes a u_char pointer to the dumper as first argument
+	dumper_ptr := (*C.u_char)(unsafe.Pointer(d.cptr))
+
+	// trick to get a pointer to the underling slice
+	ptr := (*C.u_char)(unsafe.Pointer(&data[0]))
+
+	_, err = C.pcap_dump(dumper_ptr, &pkthdr, ptr)
+	return
+}
+
+// Flushes the underling file to disk.
+func (d *Dumper) Flush() (err error) {
+	n, err := C.pcap_dump_flush(d.cptr)
+	if err != nil {
+		return err
+	}
+	if n != 0 {
+		return fmt.Errorf("pcap_dump_flush failed: %d", n)
+	}
+	return
+}
+
+// Closes the underling file.
+func (d *Dumper) Close() (err error) {
+	_, err = C.pcap_dump_close(d.cptr)
+	if err != nil {
+		return err
+	}
+	return
 }
